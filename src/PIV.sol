@@ -13,7 +13,7 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
     address public immutable POOL;
     address public immutable ADDRESSES_PROVIDER;
 
-    uint256 totalOrders;
+    uint256 public totalOrders;
     mapping(uint256 => IPIV.Order) public orderMapping;
 
     constructor(address aavePool, address aaveAddressProvider) Ownable(msg.sender) {

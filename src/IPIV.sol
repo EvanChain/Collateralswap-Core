@@ -60,6 +60,8 @@ interface IPIV {
     /// @param tradingAmount The amount of collateral that was traded in the order
     event OrderTraded(uint256 indexed orderId, uint256 tradingAmount);
 
+    function totalOrders() external view returns (uint256);
+
     /// @notice Migrate from Aave to PIV
     /// @dev This function allows users to migrate their collateral and debt from Aave to PIV.
     /// @param collateralToken The address of the token representing the collateral asset

@@ -69,7 +69,7 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
     }
 
     function _checkHealthFactor() internal view {
-        (,,,,, uint256 healthFactor) = IAaveV3PoolMinimal(ADDRESSES_PROVIDER).getUserAccountData(address(this));
+        (,,,,, uint256 healthFactor) = IAaveV3PoolMinimal(POOL).getUserAccountData(address(this));
         require(healthFactor > 1 ether, "Health factor too low");
     }
 

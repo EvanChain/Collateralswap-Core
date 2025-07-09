@@ -4,13 +4,18 @@ pragma solidity ^0.8.27;
 import {IERC20, SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IPIV} from "./IPIV.sol";
 import {IRouter} from "./IRouter.sol";
+import {console} from "forge-std/console.sol";
 
 contract Router is IRouter {
     using SafeERC20 for IERC20;
 
     /// @notice Trade an order in the PIV system
     /// @param swapData The data required for the swap, including token addresses, amounts, and order datas
-    function swap(SwapData calldata swapData) external override returns (uint256 netAmountOut) {
+    function swap(SwapData calldata swapData)
+        external
+        override
+        returns (uint256 netAmountOut, uint256 totalInputAmount)
+    {
         IERC20 tokenIn = IERC20(swapData.tokenIn);
         tokenIn.safeTransferFrom(msg.sender, address(this), swapData.amountIn);
         uint256 remainningAmount = swapData.amountIn;
@@ -22,18 +27,25 @@ contract Router is IRouter {
                 // Transfer the input amount to the PIV contract
                 tokenIn.safeIncreaseAllowance(address(piv), input);
                 // Execute the swap in the PIV contract
-                piv.swap(orderData.orderIds, input, msg.sender);
+                (output, input) = piv.swap(orderData.orderIds, input, msg.sender);
                 remainningAmount -= input;
                 netAmountOut += output;
+                totalInputAmount += input;
             }
             if (remainningAmount == 0) {
                 break; // No more amount to swap
             }
         }
+        console.log("Net amount out:", netAmountOut);
         require(netAmountOut >= swapData.minAmountOut, "Insufficient output amount");
 
+        if (remainningAmount != 0) {
+            // If the remaining amount is not zero, refund the difference
+            tokenIn.safeTransfer(msg.sender, remainningAmount);
+        }
+
         // This is a placeholder implementation
-        emit SwapExecuted(swapData.tokenIn, swapData.tokenOut, msg.sender, swapData.amountIn, netAmountOut);
-        return netAmountOut;
+        emit SwapExecuted(swapData.tokenIn, swapData.tokenOut, msg.sender, totalInputAmount, netAmountOut);
+        return (netAmountOut, totalInputAmount);
     }
 }

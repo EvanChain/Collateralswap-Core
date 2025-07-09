@@ -113,12 +113,12 @@ interface IPIV {
     /// @notice Preview a swap operation based on the provided order IDs and trading amount
     /// @param orderIds An array of order IDs to consider for the swap
     /// @param tradingAmount The amount of collateral to trade
-    /// @return debtInput The total amount of debt input required for the swap
     /// @return collateralOutput The total amount of collateral output received from the swap
+    /// @return debtInput The total amount of debt input required for the swap
     function previewSwap(uint256[] calldata orderIds, uint256 tradingAmount)
         external
         view
-        returns (uint256 debtInput, uint256 collateralOutput);
+        returns (uint256 collateralOutput, uint256 debtInput);
 
     /// @notice Execute a swap operation based on the provided order IDs and trading amount
     /// @param orderIds An array of order IDs to consider for the swap

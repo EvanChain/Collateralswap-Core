@@ -3,9 +3,11 @@ pragma solidity ^0.8.27;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20, SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IAaveV3PoolMinimal} from "./extensions/IAaveV3PoolMinimal.sol";
 import {IAaveV3FlashLoanReceiver} from "./extensions/IAaveV3FlashLoanReceiver.sol";
 import {IPIV} from "./IPIV.sol";
+import {console} from "forge-std/console.sol";
 
 contract PIV is IAaveV3FlashLoanReceiver, Ownable {
     using SafeERC20 for IERC20;
@@ -15,6 +17,7 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
 
     uint256 public totalOrders;
     mapping(uint256 => IPIV.Order) public orderMapping;
+    mapping(address => uint256) public collateralOnSold;
 
     constructor(address aavePool, address aaveAddressProvider) Ownable(msg.sender) {
         POOL = aavePool;
@@ -61,16 +64,9 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
         assembly {
             newDebtAmount := tload(0)
         }
-        // check ltv
-        _checkHealthFactor();
         emit IPIV.LoanMigrated(
             msg.sender, address(collateralToken), address(debtToken), collateralAmount, newDebtAmount, interestRateMode
         );
-    }
-
-    function _checkHealthFactor() internal view {
-        (,,,,, uint256 healthFactor) = IAaveV3PoolMinimal(POOL).getUserAccountData(address(this));
-        require(healthFactor > 1 ether, "Health factor too low");
     }
 
     function placeOrder(
@@ -82,8 +78,9 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
     ) external onlyOwner returns (uint256 orderId) {
         require(collateralAmount > 0 && price > 0, "Invalid collateral or price");
         address aToken = atokenAddress(collateralToken);
-        require(IERC20(aToken).balanceOf(address(this)) >= collateralAmount, "Insufficient collateral balance");
-        orderId = totalOrders++;
+        uint256 cBalance = IERC20(aToken).balanceOf(address(this));
+        require(cBalance >= collateralAmount + collateralOnSold[collateralToken], "Insufficient collateral balance");
+        orderId = ++totalOrders;
         orderMapping[orderId] = IPIV.Order({
             collateralToken: collateralToken,
             debtToken: debtToken,
@@ -92,6 +89,7 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
             price: price,
             interestRateMode: interestRateMode
         });
+        collateralOnSold[aToken] += collateralAmount;
 
         emit IPIV.OrderPlaced(
             msg.sender, orderId, collateralToken, debtToken, collateralAmount, price, interestRateMode
@@ -108,6 +106,8 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
     }
 
     function cancelOrder(uint256 orderId) external onlyOwner {
+        IPIV.Order storage order = orderMapping[orderId];
+        collateralOnSold[atokenAddress(order.collateralToken)] -= order.collateralAmount;
         delete orderMapping[orderId];
         emit IPIV.OrderCancelled(orderId);
     }
@@ -115,16 +115,19 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
     function previewSwap(uint256[] calldata orderIds, uint256 tradingAmount)
         external
         view
-        returns (uint256 debtInput, uint256 collateralOutput)
+        returns (uint256 collateralOutput, uint256 debtInput)
     {
         for (uint256 i = 0; i < orderIds.length; i++) {
             IPIV.Order storage order = orderMapping[orderIds[i]];
-            debtInput += (tradingAmount * order.price + 1e18 - 1) / 1e18; // Assuming price is in 18 decimals
+
             if (tradingAmount > order.remainingCollateral) {
                 collateralOutput += order.remainingCollateral; // Adjust to remaining collateral if more is requested
                 tradingAmount -= order.remainingCollateral; // Reduce the trading amount by the remaining collateral
+                debtInput +=
+                    _calculateDebtAmount(order.collateralToken, order.remainingCollateral, order.debtToken, order.price);
             } else {
                 collateralOutput += tradingAmount;
+                debtInput += _calculateDebtAmount(order.collateralToken, tradingAmount, order.debtToken, order.price);
             }
         }
     }
@@ -141,21 +144,19 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
             remainningAmount -= collateralOutput;
             if (remainningAmount == 0) break;
         }
-        _checkHealthFactor();
     }
 
     function _swap(uint256 orderId, uint256 tradingAmount, address recipient) internal returns (uint256, uint256) {
         IPIV.Order storage order = orderMapping[orderId];
-        require(order.remainingCollateral >= tradingAmount, "Insufficient collateral");
         if (tradingAmount > order.remainingCollateral) {
             tradingAmount = order.remainingCollateral; // Adjust to remaining collateral if more is requested
             order.remainingCollateral = 0; // All collateral used
         } else {
-            order.remainingCollateral -= tradingAmount;
+            order.remainingCollateral -= tradingAmount; // Reduce the remaining collateral
         }
-        order.remainingCollateral -= tradingAmount;
-
-        uint256 debtAmount = (tradingAmount * order.price + 1e18 - 1) / 1e18; // Assuming price is in 18 decimals
+        console.log("tradingAmount", tradingAmount);
+        uint256 debtAmount = _calculateDebtAmount(order.collateralToken, tradingAmount, order.debtToken, order.price);
+        console.log("debtAmount", debtAmount);
         IERC20(order.debtToken).safeTransferFrom(msg.sender, address(this), debtAmount);
         IERC20(order.debtToken).safeIncreaseAllowance(POOL, debtAmount);
         // Repay the debt
@@ -163,10 +164,23 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
         IAaveV3PoolMinimal(POOL).repay(order.debtToken, debtAmount, order.interestRateMode, address(this));
         // Transfer the trading amount to the caller
         address aToken = atokenAddress(order.collateralToken);
+        collateralOnSold[aToken] -= tradingAmount;
         IERC20(aToken).safeIncreaseAllowance(POOL, tradingAmount);
         IAaveV3PoolMinimal(POOL).withdraw(order.collateralToken, tradingAmount, recipient);
         emit IPIV.OrderTraded(orderId, tradingAmount);
         // Logic to handle the swap can be added here
         return (tradingAmount, debtAmount);
+    }
+
+    function _calculateDebtAmount(address collateralToken, uint256 collateralAmount, address debtToken, uint256 price)
+        internal
+        view
+        returns (uint256 requiredDebtAmount)
+    {
+        // price = debtToken * 1e18 / collateralToken
+        uint256 collateralUnits = 10 ** IERC20Metadata(collateralToken).decimals();
+        uint256 debtUnits = 10 ** IERC20Metadata(debtToken).decimals();
+        uint256 denimonator = collateralUnits * 1 ether;
+        requiredDebtAmount = (collateralAmount * price * debtUnits + denimonator - 1) / denimonator; // rounding up
     }
 }

@@ -2,11 +2,13 @@
 pragma solidity ^0.8.0;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Test} from "forge-std/Test.sol";
 import {PIV, IPIV} from "../src/PIV.sol";
 import {Router, IRouter} from "../src/Router.sol";
 import {IAaveV3PoolMinimal} from "../src/extensions/IAaveV3PoolMinimal.sol";
-
+import {console} from "forge-std/console.sol";
+ 
 contract FrokPiv is Test {
     address constant AAVE_V3_POOL = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2; // Aave V3 Pool on Ethereum Mainnet
     address constant AAVE_V3_ADDRESS_PROVIDER = 0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e;
@@ -331,4 +333,331 @@ contract FrokPiv is Test {
 
         vm.stopPrank();
     }
+
+    function testPreviewSwap() public {
+        vm.startPrank(borrower);
+
+        // Place multiple orders with different prices
+        uint256 orderCollateralAmount1 = 0.3 ether;
+        uint256 orderPrice1 = 2000e18; // 1 WETH = 2000 USDC
+        uint256 orderId1 = piv.placeOrder(weth, orderCollateralAmount1, usdc, orderPrice1, interestRate);
+
+        uint256 orderCollateralAmount2 = 0.4 ether;
+        uint256 orderPrice2 = 2100e18; // 1 WETH = 2100 USDC
+        uint256 orderId2 = piv.placeOrder(weth, orderCollateralAmount2, usdc, orderPrice2, interestRate);
+
+        // Preview swap for partial amount of first order
+        uint256[] memory orderIds = new uint256[](1);
+        orderIds[0] = orderId1;
+        uint256 tradingAmount = 0.1 ether;
+
+        (uint256 collateralOutput, uint256 debtInput) = piv.previewSwap(orderIds, tradingAmount);
+
+        // Calculate expected debt input using helper function
+        uint256 expectedDebtInput = _calculateDebtAmount(weth, tradingAmount, usdc, orderPrice1);
+        assertEq(debtInput, expectedDebtInput, "Debt input should match expected calculation");
+        assertEq(collateralOutput, tradingAmount, "Collateral output should equal trading amount");
+
+        // Preview swap across multiple orders
+        uint256[] memory multipleOrderIds = new uint256[](2);
+        multipleOrderIds[0] = orderId1;
+        multipleOrderIds[1] = orderId2;
+        uint256 largeTradingAmount = 0.5 ether; // Exceeds first order
+
+        (uint256 multiCollateralOutput, uint256 multiDebtInput) = piv.previewSwap(multipleOrderIds, largeTradingAmount);
+
+        // Expected: first order fully filled (0.3 ETH) + partial second order (0.2 ETH)
+        uint256 expectedDebtInput1 = _calculateDebtAmount(weth, orderCollateralAmount1, usdc, orderPrice1);
+        uint256 remainingAmount = largeTradingAmount - orderCollateralAmount1;
+        uint256 expectedDebtInput2 = _calculateDebtAmount(weth, remainingAmount, usdc, orderPrice2);
+
+        assertEq(multiCollateralOutput, largeTradingAmount, "Multi-order collateral output should equal trading amount");
+        assertEq(
+            multiDebtInput,
+            expectedDebtInput1 + expectedDebtInput2,
+            "Multi-order debt input should be sum of both orders"
+        );
+
+        vm.stopPrank();
+    }
+
+    function testSwapSingleOrder() public {
+        vm.startPrank(borrower);
+
+        // Place an order
+        uint256 orderCollateralAmount = 0.5 ether;
+        uint256 orderPrice = 2000e18; // 1 WETH = 2000 USDC
+        uint256 orderId = piv.placeOrder(weth, orderCollateralAmount, usdc, orderPrice, interestRate);
+
+        vm.stopPrank();
+
+        // Setup trader with USDC
+        uint256 tradingAmount = 0.2 ether;
+        uint256 requiredUSDC = _calculateDebtAmount(weth, tradingAmount, usdc, orderPrice);
+        deal(usdc, trader, requiredUSDC);
+
+        vm.startPrank(trader);
+        IERC20(usdc).approve(address(piv), requiredUSDC);
+
+        // Get initial balances
+        uint256 traderUSDCBefore = IERC20(usdc).balanceOf(trader);
+        uint256 traderWETHBefore = IERC20(weth).balanceOf(trader);
+
+        // Execute swap
+        uint256[] memory orderIds = new uint256[](1);
+        orderIds[0] = orderId;
+
+        vm.expectEmit(true, true, true, true);
+        emit IPIV.OrderTraded(orderId, tradingAmount);
+
+        (uint256 totalCollateralOutput, uint256 totalDebtInput) = piv.swap(orderIds, tradingAmount, trader);
+
+        // Verify swap results
+        assertEq(totalCollateralOutput, tradingAmount, "Collateral output should match trading amount");
+        assertEq(totalDebtInput, requiredUSDC, "Debt input should match required USDC");
+
+        // Verify balances changed correctly
+        assertEq(IERC20(usdc).balanceOf(trader), traderUSDCBefore - requiredUSDC, "Trader USDC balance should decrease");
+        assertEq(
+            IERC20(weth).balanceOf(trader), traderWETHBefore + tradingAmount, "Trader WETH balance should increase"
+        );
+
+        // Verify order remaining collateral updated
+        (,,, uint256 remainingCollateral,,) = piv.orderMapping(orderId);
+        assertEq(remainingCollateral, orderCollateralAmount - tradingAmount, "Remaining collateral should be updated");
+
+        vm.stopPrank();
+    }
+
+    function testSwapMultipleOrders() public {
+        vm.startPrank(borrower);
+
+        // Place multiple orders
+        uint256 orderCollateralAmount1 = 0.3 ether;
+        uint256 orderPrice1 = 2000e18; // 1 WETH = 2000 USDC
+        uint256 orderId1 = piv.placeOrder(weth, orderCollateralAmount1, usdc, orderPrice1, interestRate);
+
+        uint256 orderCollateralAmount2 = 0.4 ether;
+        uint256 orderPrice2 = 2100e18; // 1 WETH = 2100 USDC
+        uint256 orderId2 = piv.placeOrder(weth, orderCollateralAmount2, usdc, orderPrice2, interestRate);
+
+        vm.stopPrank();
+
+        // Setup trader with enough USDC for both orders
+        uint256 tradingAmount = 0.5 ether; // Will partially fill both orders
+        uint256 debtInput1 = _calculateDebtAmount(weth, orderCollateralAmount1, usdc, orderPrice1);
+        uint256 remainingAmount = tradingAmount - orderCollateralAmount1;
+        uint256 debtInput2 = _calculateDebtAmount(weth, remainingAmount, usdc, orderPrice2);
+        uint256 totalRequiredUSDC = debtInput1 + debtInput2;
+
+        deal(usdc, trader, totalRequiredUSDC);
+
+        vm.startPrank(trader);
+        IERC20(usdc).approve(address(piv), totalRequiredUSDC);
+
+        // Execute swap across multiple orders
+        uint256[] memory orderIds = new uint256[](2);
+        orderIds[0] = orderId1;
+        orderIds[1] = orderId2;
+
+        // Expect events for both orders
+        vm.expectEmit(true, true, true, true);
+        emit IPIV.OrderTraded(orderId1, orderCollateralAmount1);
+        vm.expectEmit(true, true, true, true);
+        emit IPIV.OrderTraded(orderId2, remainingAmount);
+
+        (uint256 totalCollateralOutput, uint256 totalDebtInput) = piv.swap(orderIds, tradingAmount, trader);
+
+        // Verify results
+        assertEq(totalCollateralOutput, tradingAmount, "Total collateral output should match trading amount");
+        assertEq(totalDebtInput, totalRequiredUSDC, "Total debt input should match required USDC");
+
+        // Verify first order is completely filled
+        (,,, uint256 remainingCollateral1,,) = piv.orderMapping(orderId1);
+        assertEq(remainingCollateral1, 0, "First order should be completely filled");
+
+        // Verify second order is partially filled
+        (,,, uint256 remainingCollateral2,,) = piv.orderMapping(orderId2);
+        assertEq(
+            remainingCollateral2, orderCollateralAmount2 - remainingAmount, "Second order should be partially filled"
+        );
+
+        vm.stopPrank();
+    }
+
+    function testSwapInsufficientCollateral() public {
+        vm.startPrank(borrower);
+
+        // Place a small order
+        uint256 orderCollateralAmount = 0.1 ether;
+        uint256 orderPrice = 2000e18; // 1 WETH = 2000 USDC
+        uint256 orderId = piv.placeOrder(weth, orderCollateralAmount, usdc, orderPrice, interestRate);
+
+        vm.stopPrank();
+
+        // Try to swap more than available
+        uint256 excessiveTradingAmount = 0.2 ether;
+        uint256 requiredUSDC = _calculateDebtAmount(weth, excessiveTradingAmount, usdc, orderPrice);
+        deal(usdc, trader, requiredUSDC);
+
+        vm.startPrank(trader);
+        IERC20(usdc).approve(address(piv), requiredUSDC);
+
+        uint256[] memory orderIds = new uint256[](1);
+        orderIds[0] = orderId;
+
+        (uint256 totalCollateralOutput, uint256 totalDebtInput) = piv.swap(orderIds, excessiveTradingAmount, trader);
+        assertEq(totalCollateralOutput, orderCollateralAmount, "Should only fill available collateral");
+        assertEq(
+            totalDebtInput,
+            _calculateDebtAmount(weth, orderCollateralAmount, usdc, orderPrice),
+            "Should only charge for available collateral"
+        );
+        vm.stopPrank();
+    }
+
+    function testSwapInsufficientUSDCBalance() public {
+        vm.startPrank(borrower);
+
+        // Place an order
+        uint256 orderCollateralAmount = 0.5 ether;
+        uint256 orderPrice = 2000e18; // 1 WETH = 2000 USDC
+        uint256 orderId = piv.placeOrder(weth, orderCollateralAmount, usdc, orderPrice, interestRate);
+
+        vm.stopPrank();
+
+        // Give trader insufficient USDC
+        uint256 tradingAmount = 0.2 ether;
+        uint256 requiredUSDC = _calculateDebtAmount(weth, tradingAmount, usdc, orderPrice);
+        uint256 insufficientUSDC = requiredUSDC / 2;
+        deal(usdc, trader, insufficientUSDC);
+
+        vm.startPrank(trader);
+        IERC20(usdc).approve(address(piv), insufficientUSDC);
+
+        uint256[] memory orderIds = new uint256[](1);
+        orderIds[0] = orderId;
+
+        vm.expectRevert(); // Should revert due to insufficient balance
+        piv.swap(orderIds, tradingAmount, trader);
+
+        vm.stopPrank();
+    }
+
+    function testRouterSwap() public {
+        vm.startPrank(borrower);
+
+        // Place an order
+        uint256 orderCollateralAmount = 0.5 ether;
+        uint256 orderPrice = 2000e18; // 1 WETH = 2000 USDC
+        uint256 orderId = piv.placeOrder(weth, orderCollateralAmount, usdc, orderPrice, interestRate);
+
+        vm.stopPrank();
+
+        // Setup trader for router swap
+        uint256 tradingAmount = 0.2 ether;
+        uint256 requiredUSDC = _calculateDebtAmount(weth, tradingAmount, usdc, orderPrice);
+        deal(usdc, trader, requiredUSDC);
+
+        vm.startPrank(trader);
+        IERC20(usdc).approve(address(router), requiredUSDC);
+
+        // Prepare swap data for router
+        IRouter.OrderData[] memory orderDatas = new IRouter.OrderData[](1);
+        uint256[] memory orderIds = new uint256[](1);
+        orderIds[0] = orderId;
+        orderDatas[0] = IRouter.OrderData({pivAddress: address(piv), orderIds: orderIds});
+
+        IRouter.SwapData memory swapData = IRouter.SwapData({
+            tokenIn: usdc,
+            tokenOut: weth,
+            amountIn: requiredUSDC,
+            minAmountOut: tradingAmount,
+            orderDatas: orderDatas
+        });
+
+        // Get initial balances
+        uint256 traderUSDCBefore = IERC20(usdc).balanceOf(trader);
+        uint256 traderWETHBefore = IERC20(weth).balanceOf(trader);
+
+        // Expect SwapExecuted event
+        vm.expectEmit(true, true, true, true);
+        emit IRouter.SwapExecuted(usdc, weth, trader, requiredUSDC, tradingAmount);
+
+        // Execute router swap
+        (uint256 netAmountOut,) = router.swap(swapData);
+
+        // Verify results
+        assertEq(netAmountOut, tradingAmount, "Net amount out should match trading amount");
+        assertEq(IERC20(usdc).balanceOf(trader), traderUSDCBefore - requiredUSDC, "Trader USDC should decrease");
+        assertEq(IERC20(weth).balanceOf(trader), traderWETHBefore + tradingAmount, "Trader WETH should increase");
+
+        vm.stopPrank();
+    }
+
+    function testSwapInsufficientOutputInRouter() public {
+        vm.startPrank(borrower);
+
+        // Place an order
+        uint256 orderCollateralAmount = 0.5 ether;
+        uint256 orderPrice = 2000e18; // 1 WETH = 2000 USDC
+        uint256 orderId = piv.placeOrder(weth, orderCollateralAmount, usdc, orderPrice, interestRate);
+
+        vm.stopPrank();
+
+        // Setup trader for router swap
+        uint256 tradingAmount = 0.2 ether;
+        uint256 requiredUSDC = (tradingAmount * orderPrice + 1e18 - 1) / 1e18;
+        deal(usdc, trader, requiredUSDC);
+
+        vm.startPrank(trader);
+        IERC20(usdc).approve(address(router), requiredUSDC);
+
+        // Prepare swap data with too high minimum output requirement
+        IRouter.OrderData[] memory orderDatas = new IRouter.OrderData[](1);
+        uint256[] memory orderIds = new uint256[](1);
+        orderIds[0] = orderId;
+        orderDatas[0] = IRouter.OrderData({pivAddress: address(piv), orderIds: orderIds});
+
+        IRouter.SwapData memory swapData = IRouter.SwapData({
+            tokenIn: usdc,
+            tokenOut: weth,
+            amountIn: requiredUSDC,
+            minAmountOut: tradingAmount + 0.1 ether, // Too high minimum
+            orderDatas: orderDatas
+        });
+
+        // Should revert due to insufficient output
+        vm.expectRevert("Insufficient output amount");
+        router.swap(swapData);
+
+        vm.stopPrank();
+    }
+
+    function testCalculateDebtAmount() public view {
+        // Test with WETH as collateral and USDC as debt
+        uint256 collateralAmount1 = 1 ether; // 1 WETH
+        uint256 price = 2000e18; // 1 WETH = 2000 USDC
+
+        uint256 requiredDebtAmount = _calculateDebtAmount(weth, collateralAmount1, usdc, price);
+        assertEq(requiredDebtAmount, 2000e6, "Should calculate correct debt amount for 1 WETH at $2000");
+
+        // Test with different price
+        price = 2500e18; // 1 WETH = 2500 USDC
+        requiredDebtAmount = _calculateDebtAmount(weth, collateralAmount1, usdc, price);
+        assertEq(requiredDebtAmount, 2500e6, "Should calculate correct debt amount for 1 WETH at $2500");
+    }
+
+    function _calculateDebtAmount(address collateralToken, uint256 collateralAmount_, address debtToken, uint256 price)
+        internal
+        view
+        returns (uint256 requiredDebtAmount)
+    {
+        // price = debtToken * 1e18 / collateralToken
+        uint256 collateralUnits = 10 ** IERC20Metadata(collateralToken).decimals();
+        uint256 debtUnits = 10 ** IERC20Metadata(debtToken).decimals();
+        uint256 denimonator = collateralUnits * 1 ether;
+        requiredDebtAmount = (collateralAmount_ * price * debtUnits + denimonator - 1) / denimonator; // rounding up
+    }
+
 }

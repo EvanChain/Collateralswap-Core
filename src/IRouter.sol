@@ -27,5 +27,7 @@ interface IRouter {
 
     /// @notice Trade an order in the PIV system
     /// @param swapData The data required for the swap, including token addresses, amounts, and order datas
-    function swap(SwapData calldata swapData) external returns (uint256 netAmountOut);
+    /// @return netAmountOut The total amount of the token being bought (collateral Token) after the swap
+    /// @return totalInputAmount The total amount of the token being sold (debt token) used in the swap
+    function swap(SwapData calldata swapData) external returns (uint256 netAmountOut, uint256 totalInputAmount);
 }

@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface IRouter {
+    struct OrderData {
+        address pivAddress; // The address of the PIV contract
+        uint256[] orderIds; // The IDs of the orders to be traded
+    }
+
+    struct SwapData {
+        address tokenIn; // The address of the token being sold (debt token)
+        address tokenOut; // The address of the token being bought (collateral Token)
+        uint256 amountIn; // The amount of the token being sold (debt token)
+        uint256 minAmountOut; // The minimum amount of the token being bought (collateral Token)
+        OrderData[] orderDatas; // The IDs of the orders to be traded
+    }
+
+    /// @notice Emitted when a swap is executed
+    /// @param tokenIn The address of the token being sold (debt token)
+    /// @param tokenOut The address of the token being bought (collateral Token)
+    /// @param amountIn The amount of the token being sold (debt token)
+    /// @param finalAmountOut The final amount of the token being bought (collateral Token)
+
+    event SwapExecuted(
+        address indexed tokenIn, address indexed tokenOut, address caller, uint256 amountIn, uint256 finalAmountOut
+    );
+
+    /// @notice Trade an order in the PIV system
+    /// @param swapData The data required for the swap, including token addresses, amounts, and order datas
+    function swap(SwapData calldata swapData) external returns (uint256 netAmountOut);
+}

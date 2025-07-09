@@ -3,11 +3,12 @@ pragma solidity ^0.8.0;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Test} from "forge-std/Test.sol";
-import {PIV} from "./PIV.sol";
-import {IAaveV3PoolMinimal} from "./extensions/IAaveV3PoolMinimal.sol";
+import {PIV} from "../src/PIV.sol";
+import {IAaveV3PoolMinimal} from "../src/extensions/IAaveV3PoolMinimal.sol";
 
 contract FrokPiv is Test {
-    PIV public piv;
+    address constant AAVE_V3_POOL = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2; // Aave V3 Pool on Ethereum Mainnet
+    address constant AAVE_V3_ADDRESS_PROVIDER = 0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e;
 
     string MAINNET_RPC_URL = vm.envString("MAINNET_RPC_URL");
 
@@ -16,7 +17,7 @@ contract FrokPiv is Test {
     }
 
     function testMigrateFromAave() public {
-        IAaveV3PoolMinimal aavePool = IAaveV3PoolMinimal(0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2);
+        IAaveV3PoolMinimal aavePool = IAaveV3PoolMinimal(AAVE_V3_POOL);
 
         address usdc = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
         address weth = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
@@ -29,7 +30,7 @@ contract FrokPiv is Test {
 
         vm.startPrank(user);
         //create the vault
-        PIV piv = new PIV();
+        PIV piv = new PIV(AAVE_V3_POOL, AAVE_V3_ADDRESS_PROVIDER);
 
         uint256 debtAmount = 1000e6; // 1000 USDC(debt amount)
         // borrow USDC from Aave

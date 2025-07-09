@@ -2,12 +2,26 @@
 pragma solidity ^0.8.27;
 
 import {IERC20, SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IPIV} from "./IPIV.sol";
+import {IPIV, PIV} from "./PIV.sol";
 import {IRouter} from "./IRouter.sol";
 import {console} from "forge-std/console.sol";
 
 contract Router is IRouter {
     using SafeERC20 for IERC20;
+
+    address public immutable POOL;
+    address public immutable ADDRESSES_PROVIDER;
+
+    constructor(address aavePool, address aaveAddressProvider) {
+        POOL = aavePool;
+        ADDRESSES_PROVIDER = aaveAddressProvider;
+    }
+
+    function deployPIV() external override returns (address pivAddress) {
+        PIV piv = new PIV(POOL, ADDRESSES_PROVIDER, msg.sender);
+        pivAddress = address(piv);
+        emit PIVDeployed(msg.sender, pivAddress);
+    }
 
     /// @notice Trade an order in the PIV system
     /// @param swapData The data required for the swap, including token addresses, amounts, and order datas

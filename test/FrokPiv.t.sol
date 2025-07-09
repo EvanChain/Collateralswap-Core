@@ -32,11 +32,12 @@ contract FrokPiv is Test {
 
     function setUp() public {
         vm.createSelectFork(MAINNET_RPC_URL);
-        vm.prank(borrower);
-        //create the vault
-        piv = new PIV(AAVE_V3_POOL, AAVE_V3_ADDRESS_PROVIDER);
+
         // Create the router
-        router = new Router();
+        router = new Router(AAVE_V3_POOL, AAVE_V3_ADDRESS_PROVIDER);
+        //create the vault
+        vm.prank(borrower);
+        piv = PIV(router.deployPIV());
         aWeth = piv.atokenAddress(weth);
 
         // Ensure the user has Collateral tokens

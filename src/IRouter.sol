@@ -24,6 +24,15 @@ interface IRouter {
     event SwapExecuted(
         address indexed tokenIn, address indexed tokenOut, address caller, uint256 amountIn, uint256 finalAmountOut
     );
+    /// @notice Emitted when a PIV contract is deployed
+    /// @param owner The address of the owner who deployed the PIV contract
+    /// @param pivAddress The address of the deployed PIV contract
+    event PIVDeployed(address owner, address pivAddress);
+
+    /// @notice Deploy a new PIV contract
+    /// @return pivAddress The address of the newly deployed PIV contract
+    /// @dev This function creates a new PIV contract and returns its address.
+    function deployPIV() external returns (address pivAddress);
 
     /// @notice Trade an order in the PIV system
     /// @param swapData The data required for the swap, including token addresses, amounts, and order datas

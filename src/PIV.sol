@@ -113,66 +113,112 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
     }
 
     function previewSwap(uint256[] calldata orderIds, uint256 tradingAmount)
-        external
+        public
         view
         returns (uint256 collateralOutput, uint256 debtInput)
     {
         for (uint256 i = 0; i < orderIds.length; i++) {
-            IPIV.Order storage order = orderMapping[orderIds[i]];
-
-            if (tradingAmount > order.remainingCollateral) {
-                collateralOutput += order.remainingCollateral; // Adjust to remaining collateral if more is requested
-                tradingAmount -= order.remainingCollateral; // Reduce the trading amount by the remaining collateral
-                debtInput +=
-                    _calculateDebtAmount(order.collateralToken, order.remainingCollateral, order.debtToken, order.price);
+            IPIV.Order memory order = orderMapping[orderIds[i]];
+            console.log("orderId", orderIds[i]);
+            console.log("tradingAmount", tradingAmount);
+            uint256 output =
+                _calculateCollateralOutput(order.collateralToken, tradingAmount, order.debtToken, order.price);
+            console.log("output", output);
+            // Check if the order has enough remaining collateral
+            if (order.remainingCollateral >= output) {
+                collateralOutput += output;
+                debtInput += tradingAmount;
+                break;
             } else {
-                collateralOutput += tradingAmount;
-                debtInput += _calculateDebtAmount(order.collateralToken, tradingAmount, order.debtToken, order.price);
+                collateralOutput += order.remainingCollateral; // Add the remaining collateral
+                // Reduce the trading amount by the remaining collateral's debt equivalent
+                uint256 requiredDebtAmt =
+                    _calculateDebtAmount(order.collateralToken, order.remainingCollateral, order.debtToken, order.price);
+                console.log("requiredDebtAmt", requiredDebtAmt);
+                tradingAmount -= requiredDebtAmt; // Reduce the trading amount by the debt equivalent of the remaining collateral
+                debtInput += requiredDebtAmt; // Add the required debt amount to the total debt input
             }
         }
+        console.log("collateralOutput", collateralOutput);
+        console.log("debtInput", debtInput);
     }
 
     function swap(uint256[] calldata orderIds, uint256 tradingAmount, address recipient)
         external
         returns (uint256 totalCollateralOutput, uint256 totalDebtInput)
     {
-        uint256 remainningAmount = tradingAmount;
-        for (uint256 i = 0; i < orderIds.length; i++) {
-            (uint256 collateralOutput, uint256 debtInput) = _swap(orderIds[i], remainningAmount, recipient);
-            totalCollateralOutput += collateralOutput;
-            totalDebtInput += debtInput;
-            remainningAmount -= collateralOutput;
-            if (remainningAmount == 0) break;
-        }
-    }
+        (uint256 collateralOutput, uint256 debtInput) = previewSwap(orderIds, tradingAmount);
+        (totalCollateralOutput, totalDebtInput) = (collateralOutput, debtInput);
 
-    function _swap(uint256 orderId, uint256 tradingAmount, address recipient) internal returns (uint256, uint256) {
-        IPIV.Order storage order = orderMapping[orderId];
-        if (tradingAmount > order.remainingCollateral) {
-            tradingAmount = order.remainingCollateral; // Adjust to remaining collateral if more is requested
-            order.remainingCollateral = 0; // All collateral used
-        } else {
-            order.remainingCollateral -= tradingAmount; // Reduce the remaining collateral
+        for (uint256 i = 0; i < orderIds.length; i++) {
+            IPIV.Order storage order = orderMapping[orderIds[i]];
+            if (collateralOutput >= order.remainingCollateral) {
+                collateralOutput -= order.remainingCollateral; // Reduce the collateral output by the used amount
+                emit IPIV.OrderTraded(orderIds[i], order.remainingCollateral);
+                order.remainingCollateral = 0; // Use all remaining collateral
+            } else {
+                order.remainingCollateral -= collateralOutput; // Reduce the remaining collateral by the used amount
+                emit IPIV.OrderTraded(orderIds[i], collateralOutput);
+                break;
+            }
         }
-        console.log("tradingAmount", tradingAmount);
-        uint256 debtAmount = _calculateDebtAmount(order.collateralToken, tradingAmount, order.debtToken, order.price);
-        console.log("debtAmount", debtAmount);
-        IERC20(order.debtToken).safeTransferFrom(msg.sender, address(this), debtAmount);
-        IERC20(order.debtToken).safeIncreaseAllowance(POOL, debtAmount);
+
+        IERC20 debtToken = IERC20(orderMapping[orderIds[0]].debtToken);
+        IERC20 collateralToken = IERC20(orderMapping[orderIds[0]].collateralToken);
+        debtToken.safeTransferFrom(msg.sender, address(this), totalDebtInput);
+        debtToken.safeIncreaseAllowance(POOL, totalDebtInput);
+
         // Repay the debt
         // Note: This assumes the debt token is the same as the one used in the order
-        IAaveV3PoolMinimal(POOL).repay(order.debtToken, debtAmount, order.interestRateMode, address(this));
+        IAaveV3PoolMinimal(POOL).repay(
+            address(debtToken), totalDebtInput, orderMapping[orderIds[0]].interestRateMode, address(this)
+        );
         // Transfer the trading amount to the caller
-        address aToken = atokenAddress(order.collateralToken);
-        collateralOnSold[aToken] -= tradingAmount;
-        IERC20(aToken).safeIncreaseAllowance(POOL, tradingAmount);
-        IAaveV3PoolMinimal(POOL).withdraw(order.collateralToken, tradingAmount, recipient);
-        emit IPIV.OrderTraded(orderId, tradingAmount);
-        // Logic to handle the swap can be added here
-        return (tradingAmount, debtAmount);
+        address aToken = atokenAddress(address(collateralToken));
+        collateralOnSold[aToken] -= totalCollateralOutput;
+        IERC20(aToken).safeIncreaseAllowance(POOL, totalCollateralOutput);
+        IAaveV3PoolMinimal(POOL).withdraw(address(collateralToken), totalCollateralOutput, recipient);
     }
 
-    function _calculateDebtAmount(address collateralToken, uint256 collateralAmount, address debtToken, uint256 price)
+    // function _swap(uint256 orderId, uint256 tradingAmount, address recipient) internal returns (uint256, uint256) {
+    //     IPIV.Order storage order = orderMapping[orderId];
+    //     if (tradingAmount > order.remainingCollateral) {
+    //         tradingAmount = order.remainingCollateral; // Adjust to remaining collateral if more is requested
+    //         order.remainingCollateral = 0; // All collateral used
+    //     } else {
+    //         order.remainingCollateral -= tradingAmount; // Reduce the remaining collateral
+    //     }
+    //     console.log("tradingAmount", tradingAmount);
+    //     uint256 debtAmount = _calculateDebtAmount(order.collateralToken, tradingAmount, order.debtToken, order.price);
+    //     console.log("debtAmount", debtAmount);
+    //     IERC20(order.debtToken).safeTransferFrom(msg.sender, address(this), debtAmount);
+    //     IERC20(order.debtToken).safeIncreaseAllowance(POOL, debtAmount);
+    //     // Repay the debt
+    //     // Note: This assumes the debt token is the same as the one used in the order
+    //     IAaveV3PoolMinimal(POOL).repay(order.debtToken, debtAmount, order.interestRateMode, address(this));
+    //     // Transfer the trading amount to the caller
+    //     address aToken = atokenAddress(order.collateralToken);
+    //     collateralOnSold[aToken] -= tradingAmount;
+    //     IERC20(aToken).safeIncreaseAllowance(POOL, tradingAmount);
+    //     IAaveV3PoolMinimal(POOL).withdraw(order.collateralToken, tradingAmount, recipient);
+    //     emit IPIV.OrderTraded(orderId, tradingAmount);
+    //     // Logic to handle the swap can be added here
+    //     return (tradingAmount, debtAmount);
+    // }
+
+    function _calculateCollateralOutput(address collateralToken, uint256 debtAmount, address debtToken, uint256 price)
+        internal
+        view
+        returns (uint256 collateralOutputAmount)
+    {
+        // price = collateral price * 1e18 / debt price
+        uint256 collateralUnits = 10 ** IERC20Metadata(collateralToken).decimals();
+        uint256 debtUnits = 10 ** IERC20Metadata(debtToken).decimals();
+
+        collateralOutputAmount = (debtAmount * 1e18 * collateralUnits) / (price * debtUnits);
+    }
+
+    function _calculateDebtAmount(address collateralToken, uint256 collateralAmount_, address debtToken, uint256 price)
         internal
         view
         returns (uint256 requiredDebtAmount)
@@ -181,6 +227,6 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
         uint256 collateralUnits = 10 ** IERC20Metadata(collateralToken).decimals();
         uint256 debtUnits = 10 ** IERC20Metadata(debtToken).decimals();
         uint256 denimonator = collateralUnits * 1 ether;
-        requiredDebtAmount = (collateralAmount * price * debtUnits + denimonator - 1) / denimonator; // rounding up
+        requiredDebtAmount = (collateralAmount_ * price * debtUnits + denimonator - 1) / denimonator; // rounding up
     }
 }

@@ -8,7 +8,7 @@ import {PIV, IPIV} from "../src/PIV.sol";
 import {Router, IRouter} from "../src/Router.sol";
 import {IAaveV3PoolMinimal} from "../src/extensions/IAaveV3PoolMinimal.sol";
 import {console} from "forge-std/console.sol";
- 
+
 contract FrokPiv is Test {
     address constant AAVE_V3_POOL = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2; // Aave V3 Pool on Ethereum Mainnet
     address constant AAVE_V3_ADDRESS_PROVIDER = 0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e;
@@ -73,7 +73,7 @@ contract FrokPiv is Test {
 
         // Check initial state
         uint256 initialTotalOrders = piv.totalOrders();
-        uint256 expectedOrderId = initialTotalOrders;
+        uint256 expectedOrderId = initialTotalOrders + 1;
 
         // Check that PIV has sufficient collateral balance
         uint256 pivCollateralBalance = IERC20(aWeth).balanceOf(address(piv));
@@ -349,35 +349,33 @@ contract FrokPiv is Test {
         // Preview swap for partial amount of first order
         uint256[] memory orderIds = new uint256[](1);
         orderIds[0] = orderId1;
-        uint256 tradingAmount = 0.1 ether;
+        uint256 tradingAmount = 200e6;
 
         (uint256 collateralOutput, uint256 debtInput) = piv.previewSwap(orderIds, tradingAmount);
 
         // Calculate expected debt input using helper function
-        uint256 expectedDebtInput = _calculateDebtAmount(weth, tradingAmount, usdc, orderPrice1);
-        assertEq(debtInput, expectedDebtInput, "Debt input should match expected calculation");
-        assertEq(collateralOutput, tradingAmount, "Collateral output should equal trading amount");
+        uint256 expectedCollateralOutput = _calculateCollateralOutput(weth, tradingAmount, usdc, orderPrice1);
+        assertEq(debtInput, tradingAmount, "Debt input should match expected calculation");
+        assertEq(
+            collateralOutput, expectedCollateralOutput, "Collateral output should equal expected collateral output"
+        );
 
         // Preview swap across multiple orders
         uint256[] memory multipleOrderIds = new uint256[](2);
         multipleOrderIds[0] = orderId1;
         multipleOrderIds[1] = orderId2;
-        uint256 largeTradingAmount = 0.5 ether; // Exceeds first order
+        uint256 largeTradingAmount = 1020e6; // Exceeds first order
+        uint256 expectedLargeCollateralOutput = 0.5 ether; // 0.3 + 0.2 ETH
 
         (uint256 multiCollateralOutput, uint256 multiDebtInput) = piv.previewSwap(multipleOrderIds, largeTradingAmount);
 
-        // Expected: first order fully filled (0.3 ETH) + partial second order (0.2 ETH)
-        uint256 expectedDebtInput1 = _calculateDebtAmount(weth, orderCollateralAmount1, usdc, orderPrice1);
-        uint256 remainingAmount = largeTradingAmount - orderCollateralAmount1;
-        uint256 expectedDebtInput2 = _calculateDebtAmount(weth, remainingAmount, usdc, orderPrice2);
-
-        assertEq(multiCollateralOutput, largeTradingAmount, "Multi-order collateral output should equal trading amount");
+        // Expected: first order fully filled (0.3 ETH 600 USDC) + partial second order (0.2 ETH 420 USDC)
         assertEq(
-            multiDebtInput,
-            expectedDebtInput1 + expectedDebtInput2,
-            "Multi-order debt input should be sum of both orders"
+            multiCollateralOutput,
+            expectedLargeCollateralOutput,
+            "Multi-order collateral output should equal trading amount"
         );
-
+        assertEq(multiDebtInput, largeTradingAmount, "Multi-order debt input should be sum of both orders");
         vm.stopPrank();
     }
 
@@ -391,13 +389,13 @@ contract FrokPiv is Test {
 
         vm.stopPrank();
 
-        // Setup trader with USDC
-        uint256 tradingAmount = 0.2 ether;
-        uint256 requiredUSDC = _calculateDebtAmount(weth, tradingAmount, usdc, orderPrice);
-        deal(usdc, trader, requiredUSDC);
+        // Setup trader with 400 USDC
+        uint256 tradingAmount = 400e6;
+        uint256 expectedCollateralOutput = _calculateCollateralOutput(weth, tradingAmount, usdc, orderPrice);
+        deal(usdc, trader, tradingAmount);
 
         vm.startPrank(trader);
-        IERC20(usdc).approve(address(piv), requiredUSDC);
+        IERC20(usdc).approve(address(piv), tradingAmount);
 
         // Get initial balances
         uint256 traderUSDCBefore = IERC20(usdc).balanceOf(trader);
@@ -408,23 +406,33 @@ contract FrokPiv is Test {
         orderIds[0] = orderId;
 
         vm.expectEmit(true, true, true, true);
-        emit IPIV.OrderTraded(orderId, tradingAmount);
+        emit IPIV.OrderTraded(orderId, expectedCollateralOutput);
 
         (uint256 totalCollateralOutput, uint256 totalDebtInput) = piv.swap(orderIds, tradingAmount, trader);
 
         // Verify swap results
-        assertEq(totalCollateralOutput, tradingAmount, "Collateral output should match trading amount");
-        assertEq(totalDebtInput, requiredUSDC, "Debt input should match required USDC");
+        assertEq(
+            totalCollateralOutput, expectedCollateralOutput, "Collateral output should match expected collateral output"
+        );
+        assertEq(totalDebtInput, tradingAmount, "Debt input should match tradingAmount");
 
         // Verify balances changed correctly
-        assertEq(IERC20(usdc).balanceOf(trader), traderUSDCBefore - requiredUSDC, "Trader USDC balance should decrease");
         assertEq(
-            IERC20(weth).balanceOf(trader), traderWETHBefore + tradingAmount, "Trader WETH balance should increase"
+            IERC20(usdc).balanceOf(trader), traderUSDCBefore - tradingAmount, "Trader USDC balance should decrease"
+        );
+        assertEq(
+            IERC20(weth).balanceOf(trader),
+            traderWETHBefore + expectedCollateralOutput,
+            "Trader WETH balance should increase"
         );
 
         // Verify order remaining collateral updated
         (,,, uint256 remainingCollateral,,) = piv.orderMapping(orderId);
-        assertEq(remainingCollateral, orderCollateralAmount - tradingAmount, "Remaining collateral should be updated");
+        assertEq(
+            remainingCollateral,
+            orderCollateralAmount - expectedCollateralOutput,
+            "Remaining collateral should be updated"
+        );
 
         vm.stopPrank();
     }
@@ -444,16 +452,13 @@ contract FrokPiv is Test {
         vm.stopPrank();
 
         // Setup trader with enough USDC for both orders
-        uint256 tradingAmount = 0.5 ether; // Will partially fill both orders
-        uint256 debtInput1 = _calculateDebtAmount(weth, orderCollateralAmount1, usdc, orderPrice1);
-        uint256 remainingAmount = tradingAmount - orderCollateralAmount1;
-        uint256 debtInput2 = _calculateDebtAmount(weth, remainingAmount, usdc, orderPrice2);
-        uint256 totalRequiredUSDC = debtInput1 + debtInput2;
+        uint256 tradingAmount = 1020e6; // 600 USDC for first order + 420 USDC for second order
+        uint256 totalOutputCollateral = 0.5 ether; // 0.3 + 0.2 ETH
 
-        deal(usdc, trader, totalRequiredUSDC);
+        deal(usdc, trader, tradingAmount);
 
         vm.startPrank(trader);
-        IERC20(usdc).approve(address(piv), totalRequiredUSDC);
+        IERC20(usdc).approve(address(piv), tradingAmount);
 
         // Execute swap across multiple orders
         uint256[] memory orderIds = new uint256[](2);
@@ -464,13 +469,17 @@ contract FrokPiv is Test {
         vm.expectEmit(true, true, true, true);
         emit IPIV.OrderTraded(orderId1, orderCollateralAmount1);
         vm.expectEmit(true, true, true, true);
-        emit IPIV.OrderTraded(orderId2, remainingAmount);
+        emit IPIV.OrderTraded(orderId2, totalOutputCollateral - orderCollateralAmount1);
 
         (uint256 totalCollateralOutput, uint256 totalDebtInput) = piv.swap(orderIds, tradingAmount, trader);
 
         // Verify results
-        assertEq(totalCollateralOutput, tradingAmount, "Total collateral output should match trading amount");
-        assertEq(totalDebtInput, totalRequiredUSDC, "Total debt input should match required USDC");
+        assertEq(
+            totalCollateralOutput,
+            totalOutputCollateral,
+            "Total collateral output should match expected collateral output"
+        );
+        assertEq(totalDebtInput, tradingAmount, "Total debt input should match required USDC");
 
         // Verify first order is completely filled
         (,,, uint256 remainingCollateral1,,) = piv.orderMapping(orderId1);
@@ -479,7 +488,9 @@ contract FrokPiv is Test {
         // Verify second order is partially filled
         (,,, uint256 remainingCollateral2,,) = piv.orderMapping(orderId2);
         assertEq(
-            remainingCollateral2, orderCollateralAmount2 - remainingAmount, "Second order should be partially filled"
+            remainingCollateral2,
+            orderCollateralAmount2 - (totalOutputCollateral - orderCollateralAmount1),
+            "Second order should be partially filled"
         );
 
         vm.stopPrank();
@@ -555,12 +566,12 @@ contract FrokPiv is Test {
         vm.stopPrank();
 
         // Setup trader for router swap
-        uint256 tradingAmount = 0.2 ether;
-        uint256 requiredUSDC = _calculateDebtAmount(weth, tradingAmount, usdc, orderPrice);
-        deal(usdc, trader, requiredUSDC);
+        uint256 tradingAmount = 400e6; // 400 USDC worth of WETH
+        uint256 expectedCollateralOutput = _calculateCollateralOutput(weth, tradingAmount, usdc, orderPrice);
+        deal(usdc, trader, tradingAmount);
 
         vm.startPrank(trader);
-        IERC20(usdc).approve(address(router), requiredUSDC);
+        IERC20(usdc).approve(address(router), tradingAmount);
 
         // Prepare swap data for router
         IRouter.OrderData[] memory orderDatas = new IRouter.OrderData[](1);
@@ -571,8 +582,8 @@ contract FrokPiv is Test {
         IRouter.SwapData memory swapData = IRouter.SwapData({
             tokenIn: usdc,
             tokenOut: weth,
-            amountIn: requiredUSDC,
-            minAmountOut: tradingAmount,
+            amountIn: tradingAmount,
+            minAmountOut: expectedCollateralOutput,
             orderDatas: orderDatas
         });
 
@@ -582,15 +593,17 @@ contract FrokPiv is Test {
 
         // Expect SwapExecuted event
         vm.expectEmit(true, true, true, true);
-        emit IRouter.SwapExecuted(usdc, weth, trader, requiredUSDC, tradingAmount);
+        emit IRouter.SwapExecuted(usdc, weth, trader, tradingAmount, expectedCollateralOutput);
 
         // Execute router swap
         (uint256 netAmountOut,) = router.swap(swapData);
 
         // Verify results
-        assertEq(netAmountOut, tradingAmount, "Net amount out should match trading amount");
-        assertEq(IERC20(usdc).balanceOf(trader), traderUSDCBefore - requiredUSDC, "Trader USDC should decrease");
-        assertEq(IERC20(weth).balanceOf(trader), traderWETHBefore + tradingAmount, "Trader WETH should increase");
+        assertEq(netAmountOut, expectedCollateralOutput, "Net amount out should match trading amount");
+        assertEq(IERC20(usdc).balanceOf(trader), traderUSDCBefore - tradingAmount, "Trader USDC should decrease");
+        assertEq(
+            IERC20(weth).balanceOf(trader), traderWETHBefore + expectedCollateralOutput, "Trader WETH should increase"
+        );
 
         vm.stopPrank();
     }
@@ -606,12 +619,12 @@ contract FrokPiv is Test {
         vm.stopPrank();
 
         // Setup trader for router swap
-        uint256 tradingAmount = 0.2 ether;
-        uint256 requiredUSDC = (tradingAmount * orderPrice + 1e18 - 1) / 1e18;
-        deal(usdc, trader, requiredUSDC);
+        uint256 tradingAmount = 600e6; // 600 USDC worth of WETH
+        uint256 expectedCollateralOutput = _calculateCollateralOutput(weth, tradingAmount, usdc, orderPrice);
+        deal(usdc, trader, tradingAmount);
 
         vm.startPrank(trader);
-        IERC20(usdc).approve(address(router), requiredUSDC);
+        IERC20(usdc).approve(address(router), tradingAmount);
 
         // Prepare swap data with too high minimum output requirement
         IRouter.OrderData[] memory orderDatas = new IRouter.OrderData[](1);
@@ -622,8 +635,8 @@ contract FrokPiv is Test {
         IRouter.SwapData memory swapData = IRouter.SwapData({
             tokenIn: usdc,
             tokenOut: weth,
-            amountIn: requiredUSDC,
-            minAmountOut: tradingAmount + 0.1 ether, // Too high minimum
+            amountIn: tradingAmount,
+            minAmountOut: expectedCollateralOutput + 0.1 ether, // Too high minimum
             orderDatas: orderDatas
         });
 
@@ -642,10 +655,28 @@ contract FrokPiv is Test {
         uint256 requiredDebtAmount = _calculateDebtAmount(weth, collateralAmount1, usdc, price);
         assertEq(requiredDebtAmount, 2000e6, "Should calculate correct debt amount for 1 WETH at $2000");
 
+        uint256 collateralOutput = _calculateCollateralOutput(weth, requiredDebtAmount, usdc, price);
+        assertEq(collateralOutput, collateralAmount1, "Should calculate correct collateral output for 1 WETH at $2000");
+
         // Test with different price
         price = 2500e18; // 1 WETH = 2500 USDC
         requiredDebtAmount = _calculateDebtAmount(weth, collateralAmount1, usdc, price);
         assertEq(requiredDebtAmount, 2500e6, "Should calculate correct debt amount for 1 WETH at $2500");
+
+        uint256 collateralOutput2 = _calculateCollateralOutput(weth, requiredDebtAmount, usdc, price);
+        assertEq(collateralOutput2, collateralAmount1, "Should calculate correct collateral output for 1 WETH at $2500");
+    }
+
+    function _calculateCollateralOutput(address collateralToken, uint256 debtAmount_, address debtToken, uint256 price)
+        internal
+        view
+        returns (uint256 collateralOutputAmount)
+    {
+        // price = collateral price * 1e18 / debt price
+        uint256 collateralUnits = 10 ** IERC20Metadata(collateralToken).decimals();
+        uint256 debtUnits = 10 ** IERC20Metadata(debtToken).decimals();
+
+        collateralOutputAmount = (debtAmount_ * 1e18 * collateralUnits) / (price * debtUnits);
     }
 
     function _calculateDebtAmount(address collateralToken, uint256 collateralAmount_, address debtToken, uint256 price)
@@ -659,5 +690,4 @@ contract FrokPiv is Test {
         uint256 denimonator = collateralUnits * 1 ether;
         requiredDebtAmount = (collateralAmount_ * price * debtUnits + denimonator - 1) / denimonator; // rounding up
     }
-
 }

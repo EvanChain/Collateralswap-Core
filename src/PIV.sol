@@ -30,20 +30,20 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
         returns (bool)
     {
         require(msg.sender == POOL, "Invalid caller");
-        (address user, IERC20 collateralAtoken, uint256 aTokenAmount, uint256 interestMode) =
+        (address user, IERC20 collateralToken, uint256 aTokenAmount, uint256 interestMode) =
             abi.decode(params, (address, IERC20, uint256, uint256));
         //repay old debt
         IERC20(asset).safeIncreaseAllowance(POOL, amount);
-        uint256 finalRepayment = IAaveV3PoolMinimal(POOL).repay(asset, amount + premium, interestMode, user);
+        IAaveV3PoolMinimal(POOL).repay(asset, amount, interestMode, user);
         //transfer aToken from user to this contract
-        collateralAtoken.safeTransferFrom(user, address(this), aTokenAmount);
+        IERC20(atokenAddress(address(collateralToken))).safeTransferFrom(user, address(this), aTokenAmount);
         //borrow new debt
-        uint256 newDebtAmount = premium + finalRepayment;
+        uint256 newDebtAmount = amount + premium;
         assembly {
             tstore(0, newDebtAmount)
         }
         IAaveV3PoolMinimal(POOL).borrow(asset, newDebtAmount, interestMode, 0, address(this));
-        IERC20(asset).safeIncreaseAllowance(POOL, amount + premium);
+        IERC20(asset).safeIncreaseAllowance(POOL, newDebtAmount);
         return true;
     }
 
@@ -228,5 +228,14 @@ contract PIV is IAaveV3FlashLoanReceiver, Ownable {
         uint256 debtUnits = 10 ** IERC20Metadata(debtToken).decimals();
         uint256 denimonator = collateralUnits * 1 ether;
         requiredDebtAmount = (collateralAmount_ * price * debtUnits + denimonator - 1) / denimonator; // rounding up
+    }
+
+    function withdrawAssets(address token, uint256 amount, address recipient) external onlyOwner {
+        require(amount > 0, "Amount must be greater than zero");
+        IERC20(token).safeTransfer(recipient, amount);
+    }
+
+    function getBalance(address token) external view returns (uint256) {
+        return IERC20(token).balanceOf(address(this));
     }
 }
